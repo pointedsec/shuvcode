@@ -1,3 +1,4 @@
+import path from "path"
 import { BusEvent } from "@/bus/bus-event"
 import { isOriginAllowed } from "./cors"
 import { Bus } from "@/bus"
@@ -664,9 +665,42 @@ export namespace Server {
         },
       )
       .all("/*", async (c) => {
-        const path = c.req.path
+        const reqPath = c.req.path
 
-        const response = await proxy(`https://app.shuv.ai${path}`, {
+        // Serve local static files when available (Docker/self-hosted deployments).
+        // The static directory is expected next to the binary, e.g.
+        // /usr/local/bin/shuvcode → /usr/local/bin/static/
+        const staticDir = path.join(path.dirname(process.execPath), "static")
+        const normalizedPath = reqPath === "/" ? "/index.html" : reqPath
+        const filePath = path.join(staticDir, normalizedPath)
+
+        // Guard against path traversal outside staticDir
+        if (filePath.startsWith(staticDir + path.sep) || filePath === staticDir) {
+          const file = Bun.file(filePath)
+          if (await file.exists()) {
+            const localResponse = new Response(file)
+            localResponse.headers.set(
+              "Content-Security-Policy",
+              "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
+            )
+            return localResponse
+          }
+          // For SPA routes (paths without a file extension), serve index.html
+          if (!path.extname(reqPath)) {
+            const indexFile = Bun.file(path.join(staticDir, "index.html"))
+            if (await indexFile.exists()) {
+              const localResponse = new Response(indexFile)
+              localResponse.headers.set(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
+              )
+              return localResponse
+            }
+          }
+        }
+
+        // Fall back to the hosted app (development / no local static files)
+        const response = await proxy(`https://app.shuv.ai${reqPath}`, {
           ...c.req,
           headers: {
             ...c.req.raw.headers,
